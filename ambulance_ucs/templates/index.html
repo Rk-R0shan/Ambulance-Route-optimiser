@@ -16,23 +16,31 @@
         <!-- Control Panel (Left) -->
         <div class="control-panel">
             <h1>Ambulance Route Optimizer</h1>
-            <p class="subtitle">UCS Algorithm with Real Road Data</p>
+            <p class="subtitle">Uniform Cost Search with Real Road Data & Multi-Goal Dispatch</p>
             
             <!-- Controls -->
             <div class="control-section">
-                <label for="start-node">Emergency Location:</label>
+                <label for="start-node">Emergency Incident Location:</label>
                 <select id="start-node">
-                    <option value="">Select incident...</option>
+                    <option value="">Select incident location...</option>
                 </select>
                 
                 <label for="goal-node">Destination Hospital:</label>
                 <select id="goal-node">
-                    <option value="">Select hospital...</option>
+                    <option value="nearest">⚡ Nearest Hospital (Automatic)</option>
                 </select>
+                
+                <div class="speed-control-container">
+                    <div class="speed-label-row">
+                        <label for="speed-range">Animation Interval:</label>
+                        <span id="speed-display">300ms</span>
+                    </div>
+                    <input type="range" id="speed-range" min="100" max="800" step="50" value="300">
+                </div>
                 
                 <div class="button-group">
                     <button id="btn-run" class="btn btn-primary">Run UCS</button>
-                    <button id="btn-step" class="btn btn-secondary" disabled>Step</button>
+                    <button id="btn-step" class="btn btn-secondary" title="Step through node expansions manually">Step</button>
                     <button id="btn-reset" class="btn btn-secondary" disabled>Reset</button>
                     <button id="btn-random" class="btn btn-secondary">Random Emergency</button>
                 </div>
@@ -52,10 +60,10 @@
                     </div>
                     <div class="stat-item">
                         <span class="stat-label">Nodes Explored:</span>
-                        <span class="stat-value" id="stat-explored">0 / 12</span>
+                        <span class="stat-value" id="stat-explored">0 / 0</span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-label">Priority Queue:</span>
+                        <span class="stat-label">Priority Queue (Frontier):</span>
                         <div class="priority-queue" id="priority-queue">
                             <em>Queue empty</em>
                         </div>
@@ -67,14 +75,14 @@
             <div class="control-section">
                 <h3>Expansion Log</h3>
                 <div class="step-log" id="step-log">
-                    <p><em>No algorithm run yet</em></p>
+                    <p><em>Select an incident and click Run UCS</em></p>
                 </div>
             </div>
             
             <!-- Loading Spinner -->
             <div class="spinner hidden" id="spinner">
                 <div class="spin"></div>
-                <p>Loading graph from OSRM...</p>
+                <p>Loading road network from OSRM...</p>
             </div>
             
             <!-- Error Toast -->
@@ -93,16 +101,6 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     
     <!-- Custom JS -->
-    <script>
-        // Data passed from Flask
-        const appData = {
-            nodes: {},
-            edges: [],
-            graph: {},
-            loading: false
-        };
-    </script>
-    
     <script src="{{ url_for('static', filename='map.js') }}"></script>
 </body>
 </html>

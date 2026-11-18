@@ -1,5 +1,7 @@
-import requests
+import os
+import json
 import math
+import requests
 
 # Define nodes with real Chennai locations
 NODES = {
@@ -170,9 +172,7 @@ NODES = {
     },
 }
 
-# Define edges as predefined list of connected nodes
-# Format: (node_id_1, node_id_2)
-# OSRM will auto-calculate real travel durations for each pair
+# Predefined road network topology (46 unique bidirectional connections)
 EDGES = [
     # Central corridor
     ("central",       "egmore"),
@@ -232,19 +232,30 @@ EDGES = [
     ("egmore",        "gggh"),
 
     # Cross links
-    ("mylapore",      "royapettah"),
     ("adyar",         "guindy"),
     ("anna_nagar",    "perambur"),
     ("avadi",         "madhavaram"),
-    ("inc_anna_nagar","anna_nagar"),
-    ("inc_chromepet", "chromepet"),
     ("inc_omr",       "omr"),
     ("inc_royapuram", "perambur"),
-    ("inc_tambaram",  "tambaram"),
 ]
 
-# In-memory cache for graph
+# In-memory caches
 _graph_cache = None
+_geometry_cache = {}
+
+# Bundled offline cache path
+FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "data", "chennai_cached_graph.json")
+
+
+def _load_bundled_fixture():
+    """Load pre-cached durations and geometries if available."""
+    if os.path.exists(FIXTURE_PATH):
+        try:
+            with open(FIXTURE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Warning: Could not read bundled fixture: {e}")
+    return None
 
 
 def haversine(lat1, lng1, lat2, lng2):
@@ -263,7 +274,7 @@ def haversine(lat1, lng1, lat2, lng2):
     c = 2 * math.asin(math.sqrt(a))
     distance_km = R * c
     
-    # Assume 40 km/h average speed
+    # Assume 40 km/h average emergency speed
     speed_kmh = 40
     duration_hours = distance_km / speed_kmh
     duration_seconds = duration_hours * 3600
@@ -274,34 +285,18 @@ def haversine(lat1, lng1, lat2, lng2):
 def fetch_osrm_durations(node_pairs):
     """
     Fetch travel durations from OSRM table API.
-    
-    Args:
-        node_pairs: list of tuples (node_id1, node_id2)
-    
-    Returns:
-        dict mapping (node_id1, node_id2) -> duration_seconds
-        Falls back to Haversine if OSRM is unavailable
+    Computes true directional driving durations for both (n1, n2) and (n2, n1).
+    Falls back to bundled fixture or Haversine if OSRM is unavailable.
     """
     result = {}
     
     try:
-        # Get unique nodes from pairs
-        unique_nodes = set()
-        for n1, n2 in node_pairs:
-            unique_nodes.add(n1)
-            unique_nodes.add(n2)
-        
-        unique_nodes = sorted(list(unique_nodes))
-        
-        # Build coordinates string for OSRM
+        unique_nodes = sorted(list(set([n for pair in node_pairs for n in pair])))
         coords = ";".join([f"{NODES[n]['lng']},{NODES[n]['lat']}" for n in unique_nodes])
-        
-        # Call OSRM table API
         url = f"https://router.project-osrm.org/table/v1/driving/{coords}?sources=all&destinations=all&annotations=duration"
         
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=8)
         response.raise_for_status()
-        
         data = response.json()
         
         if data.get("code") != "Ok":
@@ -309,78 +304,101 @@ def fetch_osrm_durations(node_pairs):
         
         durations = data.get("durations", [])
         
-        # Map results back to node pairs
         for n1, n2 in node_pairs:
             idx1 = unique_nodes.index(n1)
             idx2 = unique_nodes.index(n2)
-            duration = durations[idx1][idx2]
-            result[(n1, n2)] = duration
+            
+            d_forward = durations[idx1][idx2]
+            d_backward = durations[idx2][idx1]
+            
+            # Sanitize None values with Haversine
+            if d_forward is None:
+                d_forward = haversine(NODES[n1]["lat"], NODES[n1]["lng"], NODES[n2]["lat"], NODES[n2]["lng"])
+            if d_backward is None:
+                d_backward = haversine(NODES[n2]["lat"], NODES[n2]["lng"], NODES[n1]["lat"], NODES[n1]["lng"])
+                
+            result[(n1, n2)] = round(d_forward, 1)
+            result[(n2, n1)] = round(d_backward, 1)
         
         return result
     
     except Exception as e:
-        print(f"OSRM fetch failed: {e}. Using Haversine fallback.")
-        # Fall back to Haversine
+        print(f"Live OSRM table fetch failed ({e}). Attempting offline fixture / fallback.")
+        fixture = _load_bundled_fixture()
+        
         for n1, n2 in node_pairs:
-            if n1 in NODES and n2 in NODES:
-                duration = haversine(
-                    NODES[n1]["lat"], NODES[n1]["lng"],
-                    NODES[n2]["lat"], NODES[n2]["lng"]
-                )
-                result[(n1, n2)] = duration
+            forward_key = f"{n1}->{n2}"
+            backward_key = f"{n2}->{n1}"
+            
+            if fixture and "durations" in fixture:
+                d12 = fixture["durations"].get(forward_key)
+                d21 = fixture["durations"].get(backward_key)
+            else:
+                d12 = None
+                d21 = None
+                
+            if d12 is None and n1 in NODES and n2 in NODES:
+                d12 = round(haversine(NODES[n1]["lat"], NODES[n1]["lng"], NODES[n2]["lat"], NODES[n2]["lng"]), 1)
+            if d21 is None and n1 in NODES and n2 in NODES:
+                d21 = round(haversine(NODES[n2]["lat"], NODES[n2]["lng"], NODES[n1]["lat"], NODES[n1]["lng"]), 1)
+                
+            result[(n1, n2)] = d12
+            result[(n2, n1)] = d21
+            
         return result
 
 
 def get_route_geometry(start_node_id, end_node_id):
     """
-    Get polyline coordinates from OSRM route API.
-    
-    Args:
-        start_node_id: starting node identifier
-        end_node_id: ending node identifier
-    
-    Returns:
-        list of [lat, lng] coordinates for the route
-        Falls back to straight line if OSRM fails
+    Get polyline coordinates from OSRM route API or cache.
+    Caches geometries in-memory to prevent repeated network latency and rate limits.
     """
+    cache_key = f"{start_node_id}->{end_node_id}"
+    
+    # 1. Check in-memory cache
+    if cache_key in _geometry_cache:
+        return _geometry_cache[cache_key]
+    
+    # 2. Check bundled offline fixture
+    fixture = _load_bundled_fixture()
+    if fixture and "geometries" in fixture and cache_key in fixture["geometries"]:
+        _geometry_cache[cache_key] = fixture["geometries"][cache_key]
+        return _geometry_cache[cache_key]
+    
+    # 3. Query live OSRM Route API
     try:
         start = NODES[start_node_id]
         end = NODES[end_node_id]
         
         url = f"https://router.project-osrm.org/route/v1/driving/{start['lng']},{start['lat']};{end['lng']},{end['lat']}?overview=full&geometries=geojson"
-        
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=5)
         response.raise_for_status()
-        
         data = response.json()
         
         if data.get("code") != "Ok" or not data.get("routes"):
             raise Exception("No route found")
         
-        route = data["routes"][0]
-        geometry = route.get("geometry", {})
-        coordinates = geometry.get("coordinates", [])
-        
-        # Convert from [lng, lat] to [lat, lng]
-        return [[lat, lng] for lng, lat in coordinates]
+        coordinates = data["routes"][0].get("geometry", {}).get("coordinates", [])
+        geometry = [[lat, lng] for lng, lat in coordinates]
+        _geometry_cache[cache_key] = geometry
+        return geometry
     
     except Exception as e:
-        print(f"OSRM route fetch failed: {e}. Using straight line.")
-        # Fall back to straight line
+        print(f"OSRM route fetch failed for {cache_key} ({e}). Using straight line.")
         start = NODES[start_node_id]
         end = NODES[end_node_id]
-        return [
+        straight_line = [
             [start["lat"], start["lng"]],
             [end["lat"], end["lng"]]
         ]
+        _geometry_cache[cache_key] = straight_line
+        return straight_line
 
 
 def build_graph(nodes=None, edges=None):
     """
-    Build adjacency list graph from nodes and edges using OSRM data.
-    
-    Returns:
-        dict: {node_id: [(neighbor_id, duration_seconds), ...]}
+    Build directed adjacency list graph from nodes and edges.
+    Captures realistic directional road travel times.
     """
     global _graph_cache
     
@@ -392,26 +410,29 @@ def build_graph(nodes=None, edges=None):
     if edges is None:
         edges = EDGES
     
-    # Fetch durations for all edges
     durations = fetch_osrm_durations(edges)
     
-    # Build adjacency list
-    graph = {}
-    for node_id in nodes:
-        graph[node_id] = []
+    graph = {node_id: [] for node_id in nodes}
     
-    # Add edges (bidirectional)
     for n1, n2 in edges:
-        duration = durations.get((n1, n2), 0)
-        graph[n1].append((n2, duration))
-        graph[n2].append((n1, duration))
+        d12 = durations.get((n1, n2))
+        d21 = durations.get((n2, n1))
+        
+        if d12 is None:
+            d12 = haversine(nodes[n1]["lat"], nodes[n1]["lng"], nodes[n2]["lat"], nodes[n2]["lng"])
+        if d21 is None:
+            d21 = haversine(nodes[n2]["lat"], nodes[n2]["lng"], nodes[n1]["lat"], nodes[n1]["lng"])
+            
+        graph[n1].append((n2, d12))
+        graph[n2].append((n1, d21))
     
     _graph_cache = graph
     return graph
 
 
 def refresh_graph():
-    """Force refresh of graph cache."""
-    global _graph_cache
+    """Force refresh of graph and geometry cache."""
+    global _graph_cache, _geometry_cache
     _graph_cache = None
+    _geometry_cache = {}
     return build_graph()

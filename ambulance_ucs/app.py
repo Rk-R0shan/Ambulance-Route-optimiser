@@ -26,7 +26,6 @@ def api_graph():
     try:
         graph = build_graph()
         
-        # Format for frontend
         response = {
             "graph": graph,
             "edges": EDGES,
@@ -40,24 +39,38 @@ def api_graph():
 
 @app.route('/api/solve', methods=['POST'])
 def api_solve():
-    """Run UCS algorithm with the provided start and goal nodes."""
+    """
+    Run UCS algorithm with the provided start and goal nodes.
+    Supports multi-goal nearest hospital search when goal is 'nearest' or empty.
+    """
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "Request body must be valid JSON"}), 400
+            
         start = data.get('start')
         goal = data.get('goal')
         
-        # Validate nodes
-        if start not in NODES or goal not in NODES:
-            return jsonify({"error": "Invalid node selection"}), 400
+        # Validate start node
+        if not start or start not in NODES:
+            return jsonify({"error": "Invalid start node selection"}), 400
+        
+        # Handle 'nearest' or specific hospital goal
+        if goal == "nearest" or not goal:
+            goal_target = [nid for nid, node in NODES.items() if node.get('type') == 'hospital']
+        elif goal not in NODES:
+            return jsonify({"error": "Invalid goal node selection"}), 400
+        else:
+            goal_target = goal
         
         # Build graph
         graph = build_graph()
         
         # Run UCS
-        result = uniform_cost_search(graph, start, goal)
+        result = uniform_cost_search(graph, start, goal_target)
         
         if result['found']:
-            # Get route geometries for each segment
+            # Get route geometries for each segment from cache / OSRM
             route_geometry = {}
             path = result['path']
             for i in range(len(path) - 1):
@@ -71,14 +84,14 @@ def api_solve():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/graph/refresh')
+@app.route('/api/graph/refresh', methods=['GET', 'POST'])
 def api_graph_refresh():
     """Force refresh of graph cache and rebuild from OSRM."""
     try:
         graph = refresh_graph()
         return jsonify({
             "success": True,
-            "message": "Graph refreshed",
+            "message": "Graph and geometry cache refreshed",
             "graph": graph
         })
     except Exception as e:
